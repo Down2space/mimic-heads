@@ -16,10 +16,10 @@ HEADS = {
                   brows=dict(y=0.243, xs=(-0.150, -0.084), rx=0.022, ry=0.009, up=0.006)),
   'chipmunk':dict(cx=0.133, mouth=dict(x=0.133, w=0.062, up=0.118, lo=0.075, chin=0.045, jaw=0.34, xf=3.2, updrop=0.004, lofwd=0.02, over=0.012),
                   eyes=[(0.077, 0.183, 0.032, 0.03), (0.19, 0.183, 0.032, 0.03)],
-                  brows=dict(y=0.212, xs=(0.077, 0.19), rx=0.035, ry=0.012, up=0.007)),
+                  brows=dict(y=0.212, xs=(0.077, 0.19), rx=0.035, ry=0.012, up=0.007), blink=0.0),
   'alien':   dict(cx=0.383, mouth=dict(x=0.385, w=0.056, up=0.106, lo=0.067, chin=0.035, jaw=0.32),
                   eyes=[(0.315, 0.198, 0.052, 0.036), (0.448, 0.198, 0.052, 0.036)],
-                  brows=dict(y=0.236, xs=(0.315, 0.448), rx=0.05, ry=0.012, up=0.006), blink=0.55),
+                  brows=dict(y=0.236, xs=(0.315, 0.448), rx=0.05, ry=0.012, up=0.006), blink=0.0),
 }
 
 def ss(a, b, x):
@@ -49,9 +49,22 @@ bpy.ops.object.mode_set(mode='EDIT'); bpy.ops.mesh.select_all(action='SELECT')
 bpy.ops.mesh.separate(type='LOOSE'); bpy.ops.object.mode_set(mode='OBJECT')
 parts = [o for o in bpy.context.scene.objects if o.type == 'MESH']
 groups = {k: [] for k in HEADS}
+EYEBOX = {}
 for o in parts:
-    c = sum((G(v.co)[0] for v in o.data.vertices)) / max(1, len(o.data.vertices))
-    k = min(HEADS, key=lambda h: abs(HEADS[h]['cx'] - c)); groups[k].append(o)
+    P = [G(v.co) for v in o.data.vertices]; n = len(P)
+    c = [sum(p[i] for p in P) / n for i in range(3)]
+    lo = [min(p[i] for p in P) for i in range(3)]; hi = [max(p[i] for p in P) for i in range(3)]
+    k = min(HEADS, key=lambda h: abs(HEADS[h]['cx'] - c[0]))
+    H = HEADS[k]; M = H['mouth']; tag = None
+    if n <= 22 and c[1] > 0.235 and k != 'robot':
+        bpy.data.objects.remove(o); continue          # stray hair tufts (showed up as red spikes)
+    if M and n < 300 and abs(c[0] - M['x']) < M['w'] and M['lo'] - 0.035 < c[1] < M['up'] + 0.012:
+        tag = 'teeth_up' if c[1] > M.get('split', M['lo'] + 0.006) else 'teeth_lo'
+    elif n < 120 and H['eyes'] and min(math.hypot(c[0] - ex, c[1] - ey) for ex, ey, _, _ in H['eyes']) < 0.045:
+        tag = 'eyeball'; EYEBOX.setdefault(k, []).append(((lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (hi[0] - lo[0]) / 2, (hi[1] - lo[1]) / 2))
+    if tag:
+        vg = o.vertex_groups.new(name=tag); vg.add(list(range(n)), 1.0, 'REPLACE')
+    groups[k].append(o)
 heads = {}
 for k, objs in groups.items():
     bpy.ops.object.select_all(action='DESELECT')
@@ -105,8 +118,14 @@ for k, ob in heads.items():
                 nw[i] = w[i] + lam * (avg - w[i])
             w = nw
         return w
+    def in_group(name):
+        g = ob.vertex_groups.get(name)
+        if not g: return [False] * nv
+        return [any(gg.group == g.index for gg in v.groups) for v in me.vertices]
+    T_UP, T_LO, EYEB = in_group('teeth_up'), in_group('teeth_lo'), in_group('eyeball')
+    eyes = EYEBOX.get(k) or H['eyes']
     TE = set(tuple(round(c, 4) for c in p) for p in TEETH.get(k, []))
-    is_tooth = [tuple(round(c, 4) for c in p) in TE for p in gv]
+    is_tooth = [(tuple(round(c, 4) for c in p) in TE) or T_UP[i] or T_LO[i] for i, p in enumerate(gv)]
     # raw weights
     wj = [0.0] * nv; wl = [0.0] * nv; pin = [False] * nv; upl = [0.0] * nv; lol = [0.0] * nv
     for i, (x, y, z) in enumerate(gv):
@@ -129,7 +148,11 @@ for k, ob in heads.items():
     band = [(M['lo'] + 0.002 < gv[i][1] < M['up'] - 0.002 and abs(gv[i][0] - M['x']) < M['w'] * 0.85 and gv[i][2] < zf + 0.01) or is_tooth[i] for i in range(nv)]
     wl = [0.0 if band[i] else wl[i] for i in range(nv)]
     tm = smooth([1.0 if t else 0.0 for t in is_tooth], [False] * nv, 3, 0.6)
-    wj = smooth(wj, pin); wl = smooth(wl, band, 6, 0.5)
+    wj = smooth(wj, [p or T_UP[i] or T_LO[i] for i, p in enumerate(pin)])
+    for i in range(nv):
+        if T_LO[i]: wj[i] = 1.0
+        if T_UP[i] or EYEB[i]: wj[i] = 0.0
+    wl = smooth(wl, band, 6, 0.5)
     wl = [wl[i] * (1 - min(1.0, tm[i] * 1.8)) for i in range(nv)]
     upl = smooth(upl, [False] * nv, 4, 0.5); lol = smooth(lol, [False] * nv, 4, 0.5)
     sp0 = lambda x: split + M.get('smile', 0) * min(1.0, (abs(x - M['x']) / M['w']) ** 2)
@@ -137,6 +160,7 @@ for k, ob in heads.items():
     upper = [gv[i][1] >= sp0(gv[i][0]) for i in range(nv)]
     tw = smooth(tw, [False] * nv, 8, 0.6)
     tw = [min(1.0, t * 1.6) if upper[i] else 0.0 for i, t in enumerate(tw)]
+    tw = [1.0 if T_UP[i] else (0.0 if T_LO[i] else tw[i]) for i in range(nv)]
     tuck = M.get('tuck', 0.0)
     for i, (x, y, z) in enumerate(gv):
         d = {n: [0.0, 0.0, 0.0] for n in keys}
@@ -163,17 +187,42 @@ for k, ob in heads.items():
         for bx in Bw['xs']:
             r = math.hypot((x - bx) / Bw['rx'], (y - Bw['y']) / Bw['ry'])
             d['brow'][1] += Bw['up'] * ss(1.7, 0.6, r)
-        for (ex, ey0, rx, ry_) in H['eyes']:
-            r = math.hypot((x - ex) / rx, (y - ey0) / ry_)
-            we = ss(1.35, 0.85, r) * H.get('blink', 1.0)
-            if we > 0:
-                y0 = ey0 - ry_ * 0.25
-                d['blink'][1] += (y0 - y) * 0.95 * we
-                d['blink'][2] += 0.0015 * we
+        if not EYEB[i] and H.get('blink', 1.0) > 0:
+            for (ex, ey0, rx, ry_) in eyes:
+                ylid = ey0 - ry_ * 0.55
+                if y <= ylid: continue
+                r = math.hypot((x - ex) / (rx * 1.1), (y - ey0) / (ry_ * 1.1))
+                fy = ss(ey0 - ry_ * 0.35, ey0 + ry_ * 0.5, y)
+                wlid = ss(1.55, 1.0, r) * fy * H.get('blink', 1.0)
+                if wlid > 0:
+                    d['blink'][1] += max(ylid - y, -ry_ * 1.6) * wlid
+                    d['blink'][2] += 0.004 * wlid
         base = me.vertices[i].co
         for n, kb in keys.items():
             dx, dy, dz = d[n]
             kb.data[i].co = base + Vector((dx, -dz, dy))
+
+img0 = bpy.data.images[0]; W0, H0 = img0.size; PX = img0.pixels[:]
+def texcol(u, v):
+    x = min(W0 - 1, max(0, int(u * (W0 - 1)))); y = min(H0 - 1, max(0, int(v * (H0 - 1)))); o = (y * W0 + x) * 4
+    return PX[o], PX[o + 1], PX[o + 2]
+fixed = {}
+for k, ob in heads.items():
+    me = ob.data; uvl = me.uv_layers.active.data; n = 0
+    loops_by_v = {}
+    for li, l in enumerate(me.loops): loops_by_v.setdefault(l.vertex_index, []).append(li)
+    def red(li):
+        r, g, b = texcol(*uvl[li].uv)
+        if k == 'chipmunk' and G(me.vertices[me.loops[li].vertex_index].co)[1] > 0.25:
+            return r > 0.4 and r > g * 1.5 and r > b * 1.5
+        return r > 0.55 and r > g * 2.2 and r > b * 2.2
+    for p in me.polygons:
+        lis = list(p.loop_indices); bad = [li for li in lis if red(li)]
+        good = [li for li in lis if not red(li)]
+        if bad and good:
+            for li in bad: uvl[li].uv = uvl[good[0]].uv.copy(); n += 1
+    fixed[k] = n
+print('RED_FIXED', fixed)
 
 # one shared, smaller texture for the watch
 for img in bpy.data.images:
